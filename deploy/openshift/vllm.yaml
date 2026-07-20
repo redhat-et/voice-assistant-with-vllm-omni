@@ -36,7 +36,7 @@ spec:
             - --port
             - "8091"
             - --stage-overrides
-            - '{"0": {"gpu_memory_utilization": 0.95}, "1": {"devices": "1", "gpu_memory_utilization": 0.6}, "2": {"devices": "2", "gpu_memory_utilization": 0.5}}'
+            - '{"0": {"gpu_memory_utilization": 0.95}, "1": {"devices": "1", "gpu_memory_utilization": 0.6}, "2": {"devices": "1", "gpu_memory_utilization": 0.25}}'
           env:
             - name: HOME
               value: /tmp
@@ -46,9 +46,9 @@ spec:
               protocol: TCP
           resources:
             requests:
-              nvidia.com/gpu: "3"
+              nvidia.com/gpu: "2"
             limits:
-              nvidia.com/gpu: "3"
+              nvidia.com/gpu: "2"
           volumeMounts:
             - name: model
               mountPath: /model
