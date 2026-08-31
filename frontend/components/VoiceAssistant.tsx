@@ -7,9 +7,10 @@ import {
   DisconnectButton,
   useVoiceAssistant,
   useDataChannel,
+  useTranscriptions,
 } from "@livekit/components-react";
 import "@livekit/components-styles";
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 
 interface ConnectionDetails {
   serverUrl: string;
@@ -17,6 +18,13 @@ interface ConnectionDetails {
   participantName: string;
   participantToken: string;
 }
+
+type AgentMode = "completions" | "realtime";
+
+const AGENT_MODES: { value: AgentMode; label: string }[] = [
+  { value: "completions", label: "Completions API" },
+  { value: "realtime", label: "Realtime API" },
+];
 
 interface LatencyPoint {
   ms: number;
@@ -161,6 +169,41 @@ function ToolCallLog({ entries }: { entries: ToolCallEntry[] }) {
   );
 }
 
+function TranscriptPanel() {
+  // Only the assistant's speech is transcribed — neither agent backend
+  // transcribes user audio — so every segment here is the assistant's.
+  const transcriptions = useTranscriptions();
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  const sorted = [...transcriptions].sort(
+    (a, b) => a.streamInfo.timestamp - b.streamInfo.timestamp,
+  );
+  const lastText = sorted[sorted.length - 1]?.text;
+
+  useEffect(() => {
+    const el = scrollRef.current;
+    if (el) el.scrollTop = el.scrollHeight;
+  }, [sorted.length, lastText]);
+
+  if (sorted.length === 0) return null;
+
+  return (
+    <div className="w-full max-w-lg">
+      <div
+        ref={scrollRef}
+        className="flex max-h-56 flex-col gap-2 overflow-y-auto rounded-lg bg-zinc-900 p-4"
+      >
+        {sorted.map((t) => (
+          <p key={t.streamInfo.id} className="text-sm">
+            <span className="text-sky-400">Assistant:</span>{" "}
+            <span className="text-zinc-200">{t.text}</span>
+          </p>
+        ))}
+      </div>
+    </div>
+  );
+}
+
 function AgentVisualizer() {
   const { state, audioTrack } = useVoiceAssistant();
   const [points, setPoints] = useState<LatencyPoint[]>([]);
@@ -196,6 +239,7 @@ function AgentVisualizer() {
         <BarVisualizer state={state} barCount={5} trackRef={audioTrack} />
       </div>
       <p className="text-sm text-zinc-400 capitalize">{state}</p>
+      <TranscriptPanel />
       <ToolCallLog entries={toolCalls} />
       <LatencyChart points={points} />
     </div>
@@ -206,11 +250,16 @@ export default function VoiceAssistant() {
   const [connectionDetails, setConnectionDetails] =
     useState<ConnectionDetails | null>(null);
   const [connecting, setConnecting] = useState(false);
+  const [agentMode, setAgentMode] = useState<AgentMode>("completions");
 
   const handleConnect = useCallback(async () => {
     setConnecting(true);
     try {
-      const response = await fetch("/api/token", { method: "POST" });
+      const response = await fetch("/api/token", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ agentMode }),
+      });
       if (!response.ok) throw new Error("Failed to get token");
       const details: ConnectionDetails = await response.json();
       setConnectionDetails(details);
@@ -218,7 +267,7 @@ export default function VoiceAssistant() {
       console.error("Connection failed:", err);
       setConnecting(false);
     }
-  }, []);
+  }, [agentMode]);
 
   const handleDisconnected = useCallback(() => {
     setConnectionDetails(null);
@@ -228,6 +277,21 @@ export default function VoiceAssistant() {
   if (!connectionDetails) {
     return (
       <div className="flex flex-col items-center gap-6">
+        <div className="flex rounded-full bg-zinc-900 p-1">
+          {AGENT_MODES.map((mode) => (
+            <button
+              key={mode.value}
+              onClick={() => setAgentMode(mode.value)}
+              className={`rounded-full px-4 py-1.5 text-sm font-medium transition-colors ${
+                agentMode === mode.value
+                  ? "bg-white text-black"
+                  : "text-zinc-400 hover:text-zinc-200"
+              }`}
+            >
+              {mode.label}
+            </button>
+          ))}
+        </div>
         <button
           onClick={handleConnect}
           disabled={connecting}

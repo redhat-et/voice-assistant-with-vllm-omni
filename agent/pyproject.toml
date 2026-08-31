@@ -11,6 +11,7 @@ dependencies = [
     "livekit-agents[mcp]~=1.5",
     "mcp>=1.24",
     "livekit-plugins-silero~=1.5",
+    "livekit-plugins-openai~=1.5",
     "openai",
     "httpx",
     "python-dotenv",

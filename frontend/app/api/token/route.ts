@@ -1,7 +1,14 @@
 import { AccessToken, RoomAgentDispatch, RoomConfiguration } from "livekit-server-sdk";
-import { NextResponse } from "next/server";
+import { NextRequest, NextResponse } from "next/server";
 
-export async function POST() {
+const AGENT_NAMES = {
+  completions: "voice-assistant-completions",
+  realtime: "voice-assistant-realtime",
+} as const;
+
+type AgentMode = keyof typeof AGENT_NAMES;
+
+export async function POST(request: NextRequest) {
   const apiKey = process.env.LIVEKIT_API_KEY;
   const apiSecret = process.env.LIVEKIT_API_SECRET;
   const serverUrl = process.env.LIVEKIT_URL;
@@ -12,6 +19,10 @@ export async function POST() {
       { status: 500 }
     );
   }
+
+  const body = await request.json().catch(() => ({}));
+  const mode: AgentMode = body.agentMode === "realtime" ? "realtime" : "completions";
+  const agentName = AGENT_NAMES[mode];
 
   const roomName = `voice-room-${Math.random().toString(36).slice(2, 9)}`;
   const participantName = `user-${Math.random().toString(36).slice(2, 7)}`;
@@ -29,7 +40,7 @@ export async function POST() {
   });
 
   at.roomConfig = new RoomConfiguration({
-    agents: [new RoomAgentDispatch({ agentName: "voice-assistant" })],
+    agents: [new RoomAgentDispatch({ agentName })],
   });
 
   const token = await at.toJwt();
