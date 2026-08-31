@@ -1,8 +1,11 @@
+import asyncio
+import json
 import logging
 import os
 
 from dotenv import load_dotenv
-from livekit.agents import AgentServer, AgentSession, AutoSubscribe, JobContext, TurnHandlingOptions, cli
+from livekit.agents import AgentServer, AgentSession, AutoSubscribe, JobContext, TurnHandlingOptions, cli, metrics
+from livekit.agents.voice.events import FunctionToolsExecutedEvent, MetricsCollectedEvent
 from livekit.plugins import openai, silero
 
 from assistant import VoiceAssistant
@@ -36,6 +39,31 @@ async def entrypoint(ctx: JobContext):
             interruption={"mode": "vad"},
         ),
     )
+
+    def publish(payload: dict, topic: str) -> None:
+        async def _publish() -> None:
+            try:
+                await ctx.room.local_participant.publish_data(
+                    json.dumps(payload).encode(), topic=topic,
+                )
+            except Exception:
+                logger.warning("Failed to publish %s telemetry", topic)
+
+        asyncio.create_task(_publish())
+
+    @session.on("metrics_collected")
+    def _on_metrics_collected(ev: MetricsCollectedEvent) -> None:
+        m = ev.metrics
+        if not isinstance(m, metrics.RealtimeModelMetrics) or m.ttft < 0:
+            return
+        publish({"ttfa": m.ttft, "interrupted": m.cancelled}, "latency")
+
+    @session.on("function_tools_executed")
+    def _on_function_tools_executed(ev: FunctionToolsExecutedEvent) -> None:
+        for call in ev.function_calls:
+            logger.info("Tool call: %s(%s) [%s]", call.name, call.arguments[:100], call.call_id)
+            publish({"name": call.name, "arguments": call.arguments}, "tool_call")
+
     await session.start(
         agent=VoiceAssistant(),
         room=ctx.room,
