@@ -27,7 +27,7 @@ The browser captures audio via WebRTC; LiveKit routes it to whichever Python age
 - **`agent-completions`** uses Silero VAD for turn detection, then sends the user's audio to vLLM-Omni's `/v1/chat/completions` endpoint as a base64-encoded WAV. Conversation history is maintained across turns in the agent process.
 - **`agent-realtime`** streams audio to vLLM-Omni's `/v1/realtime` WebSocket endpoint (OpenAI Realtime API-compatible), still driving turn-taking locally with Silero VAD since vLLM-Omni's realtime endpoint has no server-side VAD.
 
-Both return text and spoken audio directly from Qwen3-Omni (no separate STT/TTS). The frontend renders the assistant's spoken text as a live transcript — neither agent transcribes the user's own audio, so only the assistant's side of the conversation appears as text.
+Both return text and spoken audio directly from Qwen3-Omni (no separate STT/TTS). The frontend renders the assistant's spoken text as a live transcript — neither agent transcribes the user's own audio, so only the assistant's side of the conversation appears as text. Both agents also publish time-to-first-audio and tool-call events over LiveKit data channels (topics `latency` and `tool_call`), driving the frontend's latency chart and tool-call log regardless of which one is active — `agent-completions` publishes them from `vllm_realtime.py` directly, `agent-realtime` derives them from `AgentSession`'s generic `metrics_collected`/`function_tools_executed` events.
 
 ## Prerequisites
 
