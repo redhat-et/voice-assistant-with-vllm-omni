@@ -5,21 +5,29 @@ Real-time voice assistant powered by [Qwen3-Omni](https://huggingface.co/Qwen/Qw
 ## Architecture
 
 ```
-┌──────────┐  WebRTC  ┌──────────────┐
-│ Browser   │◄───────►│ LiveKit      │
-│ (React)   │         │ Server :7880 │
-│ :3000     │         └──────┬───────┘
-└──────────┘                 │
-                             ▼
-                    ┌──────────────────┐   HTTP POST
-                    │ LiveKit Agent    │──────────────────►┌─────────────────────┐
-                    │ (Python)         │  /v1/chat/        │ vLLM-Omni           │
-                    └──────────────────┘  completions      │ Qwen3-Omni          │
-                                                          │ :8091               │
-                                                          └─────────────────────┘
+┌──────────┐  WebRTC   ┌──────────────┐  dispatch by agent name (from toggle)
+│ Browser   │◄─────────►│ LiveKit      │─────────────┬──────────────────────┐
+│ (React)   │  toggle   │ Server :7880 │              │                      │
+│ :3000     │  picks    └──────────────┘              ▼                      ▼
+└──────────┘  agent                     ┌────────────────────────┐  ┌─────────────────────┐
+                                        │ agent-completions        │  │ agent-realtime        │
+                                        │ /v1/chat/completions     │  │ /v1/realtime          │
+                                        └────────────┬─────────────┘  └───────────┬───────────┘
+                                                     │                            │
+                                                     └────────────┬───────────────┘
+                                                                  ▼
+                                                       ┌─────────────────────┐
+                                                       │ vLLM-Omni Qwen3-Omni │
+                                                       │ :8091                │
+                                                       └─────────────────────┘
 ```
 
-The browser captures audio via WebRTC, LiveKit routes it to a Python agent. The agent uses Silero VAD for turn detection, then sends the user's audio to vLLM-Omni's chat completion endpoint as a base64-encoded WAV. Qwen3-Omni processes the audio natively (no separate STT/TTS) and returns both text and spoken audio. Conversation history is maintained across turns.
+The browser captures audio via WebRTC; LiveKit routes it to whichever Python agent the frontend toggle dispatched by name for that session — both agents talk to the same vLLM-Omni/Qwen3-Omni server, just through different APIs:
+
+- **`agent-completions`** uses Silero VAD for turn detection, then sends the user's audio to vLLM-Omni's `/v1/chat/completions` endpoint as a base64-encoded WAV. Conversation history is maintained across turns in the agent process.
+- **`agent-realtime`** streams audio to vLLM-Omni's `/v1/realtime` WebSocket endpoint (OpenAI Realtime API-compatible), still driving turn-taking locally with Silero VAD since vLLM-Omni's realtime endpoint has no server-side VAD.
+
+Both return text and spoken audio directly from Qwen3-Omni (no separate STT/TTS). The frontend renders the assistant's spoken text as a live transcript — neither agent transcribes the user's own audio, so only the assistant's side of the conversation appears as text.
 
 ## Prerequisites
 
@@ -76,13 +84,14 @@ VLLM_BASE_URL=http://<gpu-server-ip>:8091/v1
 
 Dev mode uses API key `devkey` and secret `secret` (matching `.env.example` defaults).
 
-### 4. Local Machine — Start the Agent
+### 4. Local Machine — Start the Agents
 
 ```bash
-./scripts/start-agent.sh
+./scripts/start-agent.sh           # completions API agent (voice-assistant-completions)
+./scripts/start-agent-realtime.sh  # realtime API agent (voice-assistant-realtime)
 ```
 
-This creates a virtual environment on first run, installs dependencies, and starts the agent in dev mode. You should see it register with the LiveKit server.
+Each creates a virtual environment on first run, installs dependencies, and starts its agent in dev mode. Run both (in separate terminals) so the frontend toggle has something to dispatch to on either setting — you only need the one matching your toggle choice if you're just testing a single mode.
 
 ### 5. Local Machine — Start the Frontend
 
@@ -92,7 +101,7 @@ pnpm install
 pnpm dev
 ```
 
-Open http://localhost:3000, click **Start Conversation**, and speak.
+Open http://localhost:3000, pick **Completions API** or **Realtime API**, click **Start Conversation**, and speak.
 
 ## OpenShift Deployment
 
@@ -107,22 +116,24 @@ Deploy to OpenShift:
 oc apply -k deploy/openshift/
 ```
 
-See `deploy/openshift/` for the full set of manifests (LiveKit, agent, frontend, vLLM-Omni with GPU scheduling).
+See `deploy/openshift/` for the full set of manifests (LiveKit, both agents, frontend, vLLM-Omni with GPU scheduling). `agent.yaml` defines two separate Deployments/HPAs — `agent-completions` and `agent-realtime` — running the same container image with a different entrypoint, so both are dispatchable by the frontend toggle in the deployed environment.
 
 ## Project Structure
 
 ```
-├── agent/                  # LiveKit Python agent
+├── agent/                   # LiveKit Python agents
 │   ├── pyproject.toml
 │   └── src/
-│       ├── agent.py        # AgentSession entrypoint with Silero VAD
-│       └── vllm_realtime.py # RealtimeModel backed by chat completions
+│       ├── assistant.py      # Shared Agent (instructions, weather tool)
+│       ├── agent.py          # Completions-API entrypoint (voice-assistant-completions)
+│       ├── agent_realtime.py # Realtime-API entrypoint (voice-assistant-realtime)
+│       └── vllm_realtime.py  # RealtimeModel backed by chat completions
 ├── frontend/               # Next.js web UI
 │   ├── app/
-│   │   ├── api/token/      # JWT token generation for LiveKit
+│   │   ├── api/token/      # JWT token generation + agent dispatch for LiveKit
 │   │   └── page.tsx
 │   └── components/
-│       └── VoiceAssistant.tsx
+│       └── VoiceAssistant.tsx  # Agent toggle, transcript, latency/tool-call panels
 ├── deploy/
 │   └── openshift/          # Kustomize manifests for OpenShift
 ├── .github/
@@ -139,7 +150,10 @@ All configuration is via environment variables in `.env.local` files:
 | `LIVEKIT_URL` | `ws://localhost:7880` | LiveKit server WebSocket URL |
 | `LIVEKIT_API_KEY` | `devkey` | LiveKit API key |
 | `LIVEKIT_API_SECRET` | `secret` | LiveKit API secret |
-| `VLLM_BASE_URL` | `http://localhost:8091/v1` | vLLM-Omni HTTP endpoint |
+| `VLLM_BASE_URL` | `http://localhost:8091/v1` | vLLM-Omni HTTP endpoint (serves both `/v1/chat/completions` and `/v1/realtime`) |
+| `VLLM_MODEL` | `Qwen/Qwen3-Omni-30B-A3B-Instruct` | Model name passed to vLLM-Omni by both agents |
+
+Which agent a session uses is picked at connect time via the frontend toggle, not an environment variable — it's sent as `agentMode` in the `POST /api/token` request body and mapped to an explicit LiveKit agent dispatch name (`voice-assistant-completions` or `voice-assistant-realtime`).
 
 ## Troubleshooting
 
@@ -150,7 +164,7 @@ All configuration is via environment variables in `.env.local` files:
 
 **No audio response:**
 - Check browser microphone permissions
-- Verify the agent registered with LiveKit (check agent logs for "registered" message)
+- Verify the agent for the toggle mode you picked registered with LiveKit (check its logs for a "registered" message) — if only one of the two agents is running locally, sessions using the other toggle setting will connect but no assistant will ever join
 - Ensure `LIVEKIT_URL` in frontend `.env.local` matches the LiveKit server address
 
 **High latency:**
