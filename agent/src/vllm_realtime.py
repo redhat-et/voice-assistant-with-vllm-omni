@@ -148,7 +148,9 @@ class VLLMRealtimeModel(RealtimeModel):
     def provider(self) -> str:
         return urlparse(self._base_url).hostname or "vllm-omni"
 
-    def session(self) -> VLLMRealtimeSession:
+    def session(self, *, turn_detection_disabled: bool = False) -> VLLMRealtimeSession:
+        # This model never does server-side turn detection (turn_detection=False
+        # above), so there's nothing to disable regardless of the flag's value.
         sess = VLLMRealtimeSession(self)
         self._sessions.add(sess)
         return sess
