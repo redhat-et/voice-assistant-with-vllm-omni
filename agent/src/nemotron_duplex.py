@@ -46,8 +46,6 @@ class _Generation:
     audio_stream: _AudioStream
     text_stream: _TextStream
     function_stream: Chan[FunctionCall]
-    played_ms: float = 0.0
-    item_id: str | None = None
 
 
 class NemotronDuplexRealtimeModel(RealtimeModel):
@@ -124,6 +122,7 @@ class NemotronDuplexRealtimeSession(RealtimeSession):
         self._chat_ctx = ChatContext()
         self._tool_ctx = ToolContext([])
         self._seen_tool_output_ids: set[str] = set()
+        self._seen_function_call_ids: set[str] = set()
 
         self._client: DuplexClient | None = None
         self._run_task: asyncio.Task | None = None
@@ -287,7 +286,7 @@ class NemotronDuplexRealtimeSession(RealtimeSession):
             if event_type == "response.created":
                 self._start_generation(event.response_id)
             elif event_type == "response.output_audio.delta":
-                self._on_audio_delta(event.response_id, event.item_id, event.audio, event.sample_rate_hz)
+                self._on_audio_delta(event.response_id, event.audio, event.sample_rate_hz)
             elif event_type == "response.output_audio_transcript.delta":
                 self._on_text_delta(event.response_id, event.text)
             elif event_type == "response.output_item.done":
@@ -330,23 +329,21 @@ class NemotronDuplexRealtimeSession(RealtimeSession):
                 fut.set_result(event)
         self.emit("generation_created", event)
 
-    def _on_audio_delta(
-        self, response_id: str | None, item_id: str | None, chunk: bytes | None, sample_rate_hz: int | None
-    ) -> None:
+    def _on_audio_delta(self, response_id: str | None, chunk: bytes | None, sample_rate_hz: int | None) -> None:
         gen = self._generations.get(response_id or "")
         if gen is None or not chunk:
             return
-        if gen.item_id is None:
-            gen.item_id = item_id
         rate = sample_rate_hz or _OUTPUT_SAMPLE_RATE_HZ
         gen.audio_stream.push(
             rtc.AudioFrame(data=chunk, sample_rate=rate, num_channels=1, samples_per_channel=len(chunk) // 2)
         )
-        gen.played_ms += len(chunk) * 1000.0 / (rate * 2)
-        assert self._client is not None
-        asyncio.create_task(
-            self._client.ack_playback(gen.played_ms, response_id=response_id, item_id=gen.item_id)
-        )
+        # shortcut: no playback.ack. Nemotron VoiceChat doesn't support
+        # barge-in (the only thing the ack's truncation contract is for), and
+        # acking requires the server to have already registered the response
+        # as a history item -- which, for this model's turns, only itself
+        # happens inside a *successful* ack. The first ack for a turn almost
+        # always loses that race (confirmed live: playback_item_not_found on
+        # every turn), so there is no working ack sequence to send here.
 
     def _on_text_delta(self, response_id: str | None, text: str | None) -> None:
         gen = self._generations.get(response_id or "")
@@ -363,6 +360,12 @@ class NemotronDuplexRealtimeSession(RealtimeSession):
         arguments = item.get("arguments")
         if not isinstance(call_id, str) or not isinstance(name, str):
             return
+        # The server has sent the same completed function_call item twice for
+        # one call_id in testing; LiveKit executes a tool per FunctionCall it
+        # receives, so forwarding a duplicate re-runs the tool.
+        if call_id in self._seen_function_call_ids:
+            return
+        self._seen_function_call_ids.add(call_id)
         logger.info("Tool call: %s(%s) [%s]", name, str(arguments)[:100], call_id)
         gen.function_stream.send_nowait(
             FunctionCall(call_id=call_id, name=name, arguments=arguments if isinstance(arguments, str) else "{}")
