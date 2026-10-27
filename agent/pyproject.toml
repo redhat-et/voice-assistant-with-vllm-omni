@@ -15,6 +15,9 @@ dependencies = [
     "openai",
     "httpx",
     "python-dotenv",
+    # Transport for _vllm_omni_duplex_client.py (vendored from vllm-omni's
+    # own duplex client, used by Nemotron VoiceChat's full-duplex mode).
+    "websockets>=12",
 ]
 
 [tool.setuptools.packages.find]
