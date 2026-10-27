@@ -46,6 +46,7 @@ class _Generation:
     audio_stream: _AudioStream
     text_stream: _TextStream
     function_stream: Chan[FunctionCall]
+    played_ms: float = 0.0
 
 
 class NemotronDuplexRealtimeModel(RealtimeModel):
@@ -296,7 +297,13 @@ class NemotronDuplexRealtimeSession(RealtimeSession):
             elif event_type == "response.done":
                 self._finish_generation(event.response_id)
             elif event_type == "error":
-                logger.error("Nemotron VoiceChat duplex error: %s", raw.get("error") or raw)
+                error = raw.get("error")
+                code = error.get("code") if isinstance(error, dict) else None
+                # Expected, frequent, and harmless to the ack's real purpose
+                # (triggering server-side history cleanup when it does land);
+                # see the comment in _on_audio_delta. Anything else is real.
+                log = logger.debug if code == "playback_item_not_found" else logger.error
+                log("Nemotron VoiceChat duplex error: %s", error or raw)
 
     def _start_generation(self, response_id: str | None) -> None:
         if not response_id or response_id in self._generations:
@@ -337,13 +344,20 @@ class NemotronDuplexRealtimeSession(RealtimeSession):
         gen.audio_stream.push(
             rtc.AudioFrame(data=chunk, sample_rate=rate, num_channels=1, samples_per_channel=len(chunk) // 2)
         )
-        # shortcut: no playback.ack. Nemotron VoiceChat doesn't support
-        # barge-in (the only thing the ack's truncation contract is for), and
-        # acking requires the server to have already registered the response
-        # as a history item -- which, for this model's turns, only itself
-        # happens inside a *successful* ack. The first ack for a turn almost
-        # always loses that race (confirmed live: playback_item_not_found on
-        # every turn), so there is no working ack sequence to send here.
+        gen.played_ms += len(chunk) * 1000.0 / (rate * 2)
+        # Despite the playback_item_not_found noise this often returns (a
+        # race in the server's own bookkeeping: the item is only registered
+        # as a side effect of a *successful* ack, so a turn whose first ack
+        # arrives after the response goes inactive can never clear it), a
+        # live test with this removed entirely showed it's load-bearing:
+        # TTFT degraded to 30s+ within one minute without it, versus ~14s
+        # over a full hour of testing with it (imperfectly) in place. It's
+        # apparently the only thing that ever commits/prunes a turn's
+        # conversation-history item; omitting it compounds much faster than
+        # sending it and eating the frequent failure.
+        assert self._client is not None
+        item_id = f"item_{response_id}" if response_id else None
+        asyncio.create_task(self._client.ack_playback(gen.played_ms, response_id=response_id, item_id=item_id))
 
     def _on_text_delta(self, response_id: str | None, text: str | None) -> None:
         gen = self._generations.get(response_id or "")
