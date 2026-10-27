@@ -9,6 +9,7 @@ from livekit.agents.voice.events import FunctionToolsExecutedEvent, MetricsColle
 from livekit.plugins import openai, silero
 
 from assistant import VoiceAssistant
+from nemotron_duplex import NemotronDuplexRealtimeModel
 
 load_dotenv(".env.local")
 logger = logging.getLogger("voice-assistant-realtime")
@@ -16,6 +17,11 @@ logger = logging.getLogger("voice-assistant-realtime")
 VLLM_BASE_URL = os.getenv("VLLM_BASE_URL", "http://localhost:8091/v1")
 VLLM_MODEL = os.getenv("VLLM_MODEL", "Qwen/Qwen3-Omni-30B-A3B-Instruct")
 VLLM_API_KEY = os.getenv("VLLM_API_KEY", "EMPTY")
+# Nemotron VoiceChat is a model-native full-duplex model, not a turn-based one
+# like Qwen3-Omni -- it needs a different RealtimeModel (see nemotron_duplex.py)
+# and no local VAD/turn handling. Detected by model name so existing
+# Qwen3-Omni deployments (no code or env changes) keep working unmodified.
+IS_NEMOTRON = "nemotron" in VLLM_MODEL.lower()
 
 server = AgentServer()
 
@@ -24,21 +30,30 @@ server = AgentServer()
 async def entrypoint(ctx: JobContext):
     await ctx.connect(auto_subscribe=AutoSubscribe.AUDIO_ONLY)
 
-    session = AgentSession(
-        # vLLM-Omni's /v1/realtime endpoint doesn't support server-side VAD /
-        # turn detection, so drive turn-taking locally with Silero VAD instead.
-        llm=openai.realtime.RealtimeModel(
-            base_url=VLLM_BASE_URL,
-            api_key=VLLM_API_KEY,
-            model=VLLM_MODEL,
-            input_audio_transcription=None,
-        ),
-        vad=silero.VAD.load(),
-        turn_handling=TurnHandlingOptions(
-            turn_detection="vad",
-            interruption={"mode": "vad"},
-        ),
-    )
+    if IS_NEMOTRON:
+        session = AgentSession(
+            llm=NemotronDuplexRealtimeModel(
+                base_url=VLLM_BASE_URL,
+                api_key=VLLM_API_KEY,
+                model=VLLM_MODEL,
+            ),
+        )
+    else:
+        session = AgentSession(
+            # vLLM-Omni's /v1/realtime endpoint doesn't support server-side VAD /
+            # turn detection, so drive turn-taking locally with Silero VAD instead.
+            llm=openai.realtime.RealtimeModel(
+                base_url=VLLM_BASE_URL,
+                api_key=VLLM_API_KEY,
+                model=VLLM_MODEL,
+                input_audio_transcription=None,
+            ),
+            vad=silero.VAD.load(),
+            turn_handling=TurnHandlingOptions(
+                turn_detection="vad",
+                interruption={"mode": "vad"},
+            ),
+        )
 
     def publish(payload: dict, topic: str) -> None:
         async def _publish() -> None:

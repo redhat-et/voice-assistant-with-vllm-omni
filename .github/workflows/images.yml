@@ -5,6 +5,9 @@ on:
     branches: [main]
   pull_request:
     branches: [main]
+  # Lets a feature branch get a real pushed image (ghcr.io/.../agent:sha-<short-sha>)
+  # for manual testing before it's merged: `gh workflow run images.yml --ref <branch>`.
+  workflow_dispatch: {}
 
 env:
   REGISTRY: ghcr.io
@@ -29,7 +32,7 @@ jobs:
       - uses: docker/setup-buildx-action@v3
 
       - uses: docker/login-action@v3
-        if: github.event_name == 'push'
+        if: github.event_name != 'pull_request'
         with:
           registry: ${{ env.REGISTRY }}
           username: ${{ github.actor }}
@@ -46,7 +49,7 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           context: ${{ matrix.image.context }}
-          push: ${{ github.event_name == 'push' }}
+          push: ${{ github.event_name != 'pull_request' }}
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=gha
